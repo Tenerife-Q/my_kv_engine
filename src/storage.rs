@@ -45,7 +45,7 @@ pub struct MemoryStorage {
 
 pub struct DiskStorage {
     map: Arc<RwLock<HashMap<String, String>>>,
-    // file_path: String,
+    file_path: String,
     wal_file: Arc<Mutex<File>>,
 }
 
@@ -115,7 +115,58 @@ impl DiskStorage {
         Ok(Self {
             map: Arc::new(RwLock::new(map)),
             wal_file: Arc::new(Mutex::new(append_file)),
+            file_path,
         })
+    }
+
+    pub async fn compact(&self) -> Result<()> {
+        let tmp_path = format!("{}.tmp", self.file_path);
+
+        let mut tmp_file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp_path)
+            .await?;
+
+        {
+            // 获取内存 RwLock 的读锁
+            // 思考：为什么拿读锁？因为我们要遍历导出数据。
+            // 代价：在此期间，所有的写操作（set/rm）会被阻塞，但读操作（get）可以并发进行。这叫 Stop-The-World (STW)。
+            let locked_map = self.map.read().await;
+
+            // 遍历locked_map内存中的 HashMap，将每个键值对写入临时文件tmp_file
+            for (key, value) in locked_map.iter() {
+                let log_line = format!("S\t{}\t{}\n", key, value);
+                tmp_file.write_all(log_line.as_bytes()).await?;
+            }
+
+            // 强制刷盘，确保数据写入磁盘
+            tmp_file.flush().await?;
+        }
+
+
+        // 原子替换文件
+        {
+            // 获取文件的独占锁，确保此刻没有 set 正在写入旧文件
+            let mut wal = self.wal_file.lock().await;
+            
+            // 执行操作系统的原子重命名
+            tokio::fs::rename(&tmp_path, &self.file_path).await?;
+
+            // 重新以追加模式打开新的 data.log
+            let new_file = OpenOptions::new()
+                .read(true)
+                .append(true)
+                .create(true)
+                .open(&self.file_path)
+                .await?;
+            
+            // 将锁里的旧文件句柄替换为新文件句柄！
+            *wal = new_file;
+        }
+
+        Ok(())
     }
 }
 
