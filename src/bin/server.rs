@@ -115,10 +115,12 @@ async fn handle_client(stream: TcpStream, engine: Arc<DiskStorage>) {
         // 4. read_line 会自动处理底层的系统调用、半包和粘包。
         // 它会把字节暂存到内存，直到遇到 '\n' 才返回完整的一行。
         match buf_reader.read_line(&mut line).await {
+
             Ok(0) => {
                 println!("Client disconnected.");
                 break;
             }
+
             Ok(_) => {
                 let text = line.trim();
                 if text.is_empty() {
@@ -149,12 +151,21 @@ async fn handle_client(stream: TcpStream, engine: Arc<DiskStorage>) {
                             Err(e) => format!("-ERR {}\r\n", e),
                         }
                     }
+
+                    ["compact"] => {
+                        match engine.compact().await {
+                            Ok(_) => "+OK\r\n".to_string(),
+                            Err(e) => format!("-ERR {}\r\n", e),
+                        }
+                    }
+
                     _ => "-ERR Unknown command\r\n".to_string(),
                 };
 
                 // 6. 使用独立的写端写回数据
                 writer.write_all(response.as_bytes()).await.expect("Write failed");
             }
+
             Err(e) => {
                 eprintln!("Failed to read: {}", e);
                 break;
