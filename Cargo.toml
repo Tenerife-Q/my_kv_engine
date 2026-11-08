@@ -6,12 +6,26 @@ edition = "2024"
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "1.54.1", features = ["full"] }
+tokio = { version = "1.40.0", features = ["full"] } # 建议更新到较新稳定版
+# --- 新增网络与字节流处理依赖 ---
+bytes = "1.5"
+# 注意：必须手动开启 codec feature，否则找不到 Decoder trait
+tokio-util = { version = "0.7.10", features = ["codec"] }
 
+# 保留原有的 server/client
 [[bin]]
 name = "server"
-path = "src/bin/server.rs" # 或者你目前的路径
+path = "src/bin/server.rs"
 
 [[bin]]
 name = "client"
 path = "src/bin/client.rs"
+
+# --- 新增 V2 版本的可执行文件，用于本次重构 ---
+[[bin]]
+name = "server_v2"
+path = "src/bin/server_v2.rs"
+
+[[bin]]
+name = "client_v2"
+path = "src/bin/client_v2.rs"
