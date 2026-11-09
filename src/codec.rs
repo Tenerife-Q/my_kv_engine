@@ -32,7 +32,7 @@ impl Decoder for CommandCodec {
         // 那么 payload_len 就是 0x00000400 = 1024。
 
         if payload_len > 8 * 1024 * 1024 {
-            return Err(KvError::ParseError);
+            return Err(KvError::ParseError("Payload is too large".to_string()));
         }
 
         // 3. 计算一帧的总长度
@@ -80,7 +80,7 @@ impl Encoder<String> for CommandCodec {
 
         // 1. TODO: 检查 payload_len 是否超过限制（如 8MB），超限则返回错误。
         if payload_len > 8 * 1024 * 1024 {
-            return Err(KvError::ParseError);
+            return Err(KvError::ParseError("Payload is too large".to_string()));
         }
 
         // 2. 预先为底层的 BytesMut 分配足够的容量，避免多次扩容带来的性能损耗。
@@ -94,6 +94,71 @@ impl Encoder<String> for CommandCodec {
         // 4. TODO: 将真正的字节序列追加到 dst 中。
         // 查阅文档关键词：bytes::BufMut::put_slice
         dst.put_slice(payload_bytes);
+
+        Ok(())
+    }
+}
+
+
+
+
+pub struct ClientCodec;
+
+// 客户端的 Decoder：负责解析服务端发回来的响应 (String)
+impl Decoder for ClientCodec {
+    type Item = String; // 吐出 String
+    type Error = KvError;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>> {
+        if src.len() < 4 {
+             return Ok(None); 
+        }
+
+        let mut length_bytes = &src[..4];
+        let payload_len = length_bytes.get_u32() as usize;
+
+        if payload_len > 8 * 1024 * 1024 {
+            return Err(KvError::ParseError("Payload too large".to_string()));
+        }
+
+        if src.len() < 4 + payload_len { 
+            return Ok(None); 
+        }
+
+        src.advance(4);
+        let payload_bytes = src.split_to(payload_len);
+
+        // TODO: 将 payload_bytes (BytesMut) 转换为 String。
+        // 提示：你可以用 String::from_utf8(payload_bytes.to_vec())，
+        // 或者更高效地用 std::str::from_utf8(&payload_bytes) 然后 .to_string()
+        let response = std::str::from_utf8(&payload_bytes)
+            .map_err(|_| KvError::ParseError("Invalid UTF-8".to_string()))?
+            .to_string();
+
+        Ok(Some(response))
+    }
+}
+
+// 客户端的 Encoder：负责把终端里生成的 Command 发往服务端
+impl tokio_util::codec::Encoder<Command> for ClientCodec {
+    type Error = KvError;
+
+    fn encode(&mut self, item: Command, dst: &mut BytesMut) -> Result<()> {
+        // 1. 将 Command 序列化为 JSON 字节数组 (Vec<u8>)
+        let payload_bytes = serde_json::to_vec(&item)?;
+        let payload_len = payload_bytes.len();
+
+        // TODO: 参照你之前写的 CommandCodec::encode，把长度前缀和 payload_bytes 写入 dst 中
+        // 1. 检查超限
+        if payload_len > 8 * 1024 * 1024 {
+            return Err(KvError::ParseError("Payload is too large".to_string()));
+        }
+        // 2. dst.reserve
+        dst.reserve(4 + payload_len);
+        // 3. dst.put_u32
+        dst.put_u32(payload_len as u32);
+        // 4. dst.put_slice
+        dst.put_slice(&payload_bytes);
 
         Ok(())
     }
