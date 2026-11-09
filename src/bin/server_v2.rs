@@ -24,24 +24,31 @@ async fn handle_client(stream: TcpStream, engine: Arc<DiskStorage>) {
                 // 此时你拿到的 cmd 已经是强类型的 Command 枚举了！
                 let response = match cmd {
                     Command::Set { key, value } => {
-                        // TODO: 调用 engine.set
-                        engine.set(&key, &value).await?;
-                        "+OK".to_string()
+                    // 拦截 Result，成功返回 "+OK"，失败返回 "-ERR ..."
+                        match engine.set(&key, &value).await {
+                            Ok(_) => "+OK".to_string(),
+                            Err(e) => format!("-ERR {}", e),
+                        }
                     }
                     Command::Get { key } => {
-                        // TODO: 调用 engine.get
-                        let value = engine.get(&key).await?;
-                        value.unwrap_or_else(|| "+OK".to_string())
+                        match engine.get(&key).await {
+                            Ok(Some(val)) => val, // 成功且有值
+                            Ok(None) => "-ERR Key not found".to_string(), // 成功但没值
+                            Err(e) => format!("-ERR {}", e), // 底层报错
+                        }
                     }
+                    // TODO: 自己把 Remove 和 Compact 的逻辑也改成类似 Set 的 match 处理。
                     Command::Remove { key } => {
-                        // TODO: 调用 engine.remove
-                        engine.remove(&key).await?;
-                        "+OK".to_string()
+                        match engine.remove(&key).await {
+                            Ok(_) => "+OK".to_string(),
+                            Err(e) => format!("-ERR {}", e),
+                        }
                     }
                     Command::Compact => {
-                        // TODO: 调用 engine.compact
-                        engine.compact().await?;
-                        "+OK".to_string()
+                        match engine.compact().await {
+                            Ok(_) => "+OK".to_string(),
+                            Err(e) => format!("-ERR {}", e),
+                        }
                     }
                 };
 
