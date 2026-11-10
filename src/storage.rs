@@ -42,11 +42,39 @@ pub struct MemoryStorage {
     // Arc允许多个线程安全地共享内存，RwLock允许多个读者或一个写者访问数据。
     map: Arc<RwLock<HashMap<String, String>>>,
 }
+// DiskStorage struct version 1.0
+// pub struct DiskStorage {
+//     map: Arc<RwLock<HashMap<String, String>>>,
+//     file_path: String,
+//     wal_file: Arc<Mutex<File>>,
+// }
 
+use std::os::unix::fs::FileExt; // 引入 read_at
+// ... 其他你需要的引入
+
+// 1. 定义内存索引对象
+#[derive(Debug, Clone)]
+pub struct CommandPos {
+    pub offset: u64,
+    pub length: u32,
+}
+
+// 2. 重构存储引擎结构体
 pub struct DiskStorage {
-    map: Arc<RwLock<HashMap<String, String>>>,
+    // 内存里现在只存 CommandPos，体积缩减成千上万倍！
+    index: Arc<RwLock<HashMap<String, CommandPos>>>,
+    
+    // 写入句柄（必须是独占锁）。
+    // 为什么把 u64 塞进去？因为我们需要精确追踪当前写入的偏移量（游标）。
+    // 每次写入后，游标 += 写入的字节数。
+    wal_writer: Arc<Mutex<(tokio::fs::File, u64)>>,
+    
+    // 读取句柄。
+    // 注意看类型：这是标准库的同步 File！并且没有任何 Mutex 锁！
+    // 依靠 FileExt::read_at，它可以在多线程下极速并发安全读取。
+    wal_reader: Arc<std::fs::File>, 
+    
     file_path: String,
-    wal_file: Arc<Mutex<File>>,
 }
 
 // new() for DiskStorage version 1.0
@@ -70,6 +98,7 @@ pub struct DiskStorage {
 
 
 // new() for DiskStorage version 2.0
+/*
 impl DiskStorage {
     pub async fn new(path: impl Into<String>) -> Result<Self> {
         let file_path = path.into();
@@ -165,6 +194,104 @@ impl DiskStorage {
             // 将锁里的旧文件句柄替换为新文件句柄！
             *wal = new_file;
         }
+
+        Ok(())
+    }
+}
+*/
+
+impl DiskStorage {
+    pub async fn new(path: impl Into<String>) -> Result<Self> {
+        let file_path = path.into();
+        let mut index = HashMap::new();
+        
+        // 这是一个追踪文件读取位置的游标
+        let mut current_file_offset = 0u64;
+
+        // 1. 重放阶段：以只读模式打开文件并构建索引
+        if let Ok(file) = tokio::fs::File::open(&file_path).await {
+            let reader = BufReader::new(file);
+            let mut lines = reader.lines();
+
+            while let Some(line) = lines.next_line().await? {
+                // 在 Rust 中，String::len() 返回的是 UTF-8 的【字节数】，而不是字符数。
+                // 记得加上 '\n' 的 1 个字节
+                let line_byte_len = line.len() as u64 + 1; 
+
+                let parts: Vec<&str> = line.split('\t').collect();
+                match parts.as_slice() {
+                    ["S", key, value] => {
+                        // TODO: 计算当前这个 Value 的精确物理起始位置。
+                        // 提示：S\t{key}\t{value}\n
+                        // 前置有 "S\t" (2字节)，以及 key的字节数，再加一个 '\t' (1字节)
+                        let value_offset = current_file_offset + 2 + key.len() as u64 + 1;
+                        let value_len = value.len() as u32;
+
+                        index.insert(key.to_string(), CommandPos {
+                            offset: value_offset,
+                            length: value_len,
+                        });
+                    },
+                    ["D", key] => {
+                        index.remove(*key);
+                    },
+                    _ => {}
+                }
+
+                // 推进游标，准备处理下一行
+                current_file_offset += line_byte_len;
+            }
+        }
+
+        // 2. 准备阶段：打开两个句柄
+        
+        // A. 异步追加写句柄 (Tokio File)
+        let append_file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .create(true)
+            .open(&file_path)
+            .await?;
+            
+        // B. 同步并发读句柄 (std::fs::File)
+        // 这个纯纯只能用于读，依靠操作系统的 read_at 进行多线程无锁并发！
+        let sync_reader = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&file_path)?;
+
+        Ok(Self {
+            index: Arc::new(RwLock::new(index)),
+            // 将文件末尾的偏移量作为写入游标的初始状态，打包进 Mutex
+            wal_writer: Arc::new(Mutex::new((append_file, current_file_offset))),
+            wal_reader: Arc::new(sync_reader),
+            file_path,
+        })
+    }
+    
+    // 把旧的 compact 函数先注掉！我们等主链路通了再做日志压缩。
+    pub async fn compact(&self) -> Result<()> { 
+        let tmp_file_path = format!("{}.tmp", self.file_path);
+
+        let mut tmp_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&tmp_file_path)
+            .await?;
+
+        {
+            let mut index = self.index.read().await;
+            for (key, pos) in index.iter() {
+                // 这里可以根据 key 和 pos 把数据写入 tmp_file
+                let mut buffer = ;
+                self.wal_reader.read_at(&mut buffer, pos.offset).await?;
+                tmp_file.write_all(&buffer).await?;
+            }
+            tmp_file.flush().await?;
+        }
+
+        // 替换原文件
+        std::fs::rename(&tmp_file_path, &self.file_path)?;
 
         Ok(())
     }
@@ -382,6 +509,10 @@ impl StorageEngine for DiskStorage {
 }
 */
 
+
+/*
+impl for DiskStorage version 4.0
+
 impl StorageEngine for DiskStorage {
     async fn set(&self, key: impl Into<String>, value: impl Into<String>) -> Result<()> {
         let k = key.into();
@@ -448,5 +579,124 @@ impl StorageEngine for DiskStorage {
             }
         }
 
+    }
+}
+*/
+
+
+impl StorageEngine for DiskStorage {
+    async fn set(&self, key: impl Into<String>, value: impl Into<String>) -> Result<()> {
+        let k = key.into();
+        let v = value.into();
+        let log_line = format!("S\t{}\t{}\n", k, v);
+        let log_bytes = log_line.as_bytes();
+        let write_len = log_bytes.len() as u32;
+
+        let offset = {
+            // 1. 获取追加写锁
+            let mut writer_guard = self.wal_writer.lock().await;
+            let (file, current_offset) = &mut *writer_guard;
+
+            // 2. 拿到当前的游标，作为本次数据的写入起点
+            let start_offset = *current_offset;
+
+            // 3. 执行物理写入并刷盘
+            use tokio::io::AsyncWriteExt;
+            file.write_all(log_bytes).await?;
+            file.flush().await?;
+
+            // 4. 更新游标位置（前移）
+            *current_offset += write_len as u64;
+
+            start_offset
+        }; // 锁释放
+
+        // 5. 更新内存索引
+        // 注意：你要存入的长度是【Value的长度】还是【整行日志的长度】？
+        // 建议索引只记录 Value 在文件中的绝对偏移量和长度，这样 get 的时候直接切出 Value 即可，不需要再做字符串 split！
+        // TODO: 计算仅仅是 v (Value) 在日志行中的物理偏移量和长度。
+        // 提示：S\t{key}\t{value}\n，Value 的绝对起始偏移量 = start_offset + 2 + key.len() + 1
+        let value_offset = offset + 2 + k.len() as u64 + 1;
+        let value_len = v.len() as u32;
+
+        let mut index = self.index.write().await;
+        index.insert(k, CommandPos {
+            offset: value_offset,
+            length: value_len,
+        });
+
+        Ok(())
+    }
+
+    async fn get(&self, key: &str) -> Result<Option<String>> {
+        // 1. 查内存索引
+        let index = self.index.read().await;
+        let pos = match index.get(key) {
+            Some(p) => p.clone(),
+            None => return Ok(None),
+        };
+        // 释放读锁，不要占着茅坑拉屎，接下来的磁盘 I/O 非常慢
+        drop(index); 
+
+        // 2. 准备系统调用需要的数据
+        // 将 Arc 克隆一份，准备送入另一个线程
+        let reader = Arc::clone(&self.wal_reader);
+        
+        // 3. 将阻塞的同步磁盘读取放入 spawn_blocking
+        let result = tokio::task::spawn_blocking(move || {
+            // 创建一个精确大小的缓冲区
+            let mut buf = vec![0u8; pos.length as usize];
+            
+            // TODO: 调用 std::os::unix::fs::FileExt::read_at
+            // 将文件在 pos.offset 处的数据读取到 buf 中
+            reader.read_at(&mut buf, pos.offset)?;
+            
+            // 将纯净的字节反序列化为 String
+            let value_str = String::from_utf8(buf)
+                .map_err(|_| crate::error::KvError::ParseError("Invalid utf8 in db".to_string()))?;
+                
+            // 注意这里需要明确指明返回值的错误类型，匹配最外层的闭包要求
+            Ok::<String, crate::error::KvError>(value_str)
+        }).await.expect("Spawn blocking failed"); // 这里 expect 捕获的是线程崩溃的恐慌
+
+        // 返回解包后的结果
+        match result {
+            Ok(val) => Ok(Some(val)),
+            Err(e) => Err(e),
+        }
+    }
+    
+    // TODO: remove 方法自己推导。提示：WAL 里追加一条 "D\tkey\n"，然后把 key 从 HashMap 里 remove 掉。
+    async fn remove(&self, key: impl Into<String>) -> Result<()> {
+        let k = key.into();
+        let log_line = format!("D\t{}\n", k);
+        let log_bytes = log_line.as_bytes();
+        let write_len = log_bytes.len() as u32;
+
+        let offset = {
+            // let mut writer = self.wal_writer.lock().await;
+            // let start_offset = writer.current_offset();
+            // writer.write_all(log_bytes).await?;
+            // let write_len = log_bytes.len() as u32;
+            // *writer.current_offset_mut() += write_len as u64;
+            // start_offset
+
+            let mut writer_guard = self.wal_writer.lock().await;
+            let (file, current_offset) = &mut *writer_guard;
+
+            let start_offset = *current_offset;
+
+            file.write_all(log_bytes).await?;
+            file.flush().await?;
+
+            *current_offset += write_len as u64;
+
+            start_offset
+        };
+
+        let mut index = self.index.write().await;
+        index.remove(&k);
+
+        Ok(())
     }
 }
