@@ -126,6 +126,7 @@ impl Decoder for ClientCodec {
         }
 
         src.advance(4);
+
         let payload_bytes = src.split_to(payload_len);
 
         // TODO: 将 payload_bytes (BytesMut) 转换为 String。
@@ -139,8 +140,10 @@ impl Decoder for ClientCodec {
     }
 }
 
+
+// use tokio_util::codec::Encoder;
 // 客户端的 Encoder：负责把终端里生成的 Command 发往服务端
-impl tokio_util::codec::Encoder<Command> for ClientCodec {
+impl Encoder<Command> for ClientCodec {
     type Error = KvError;
 
     fn encode(&mut self, item: Command, dst: &mut BytesMut) -> Result<()> {
