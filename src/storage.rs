@@ -268,30 +268,74 @@ impl DiskStorage {
         })
     }
     
-    // 把旧的 compact 函数先注掉！我们等主链路通了再做日志压缩。
-    pub async fn compact(&self) -> Result<()> { 
-        let tmp_file_path = format!("{}.tmp", self.file_path);
+    pub async fn compact(&self) -> Result<()> {
+        let tmp_path = format!("{}.tmp", self.file_path);
 
-        let mut tmp_file = OpenOptions::new()
-            .read(true)
+        // 1. 创建全新的临时文件
+        let mut tmp_file = tokio::fs::OpenOptions::new()
             .write(true)
             .create(true)
-            .open(&tmp_file_path)
+            .truncate(true)
+            .open(&tmp_path)
             .await?;
 
-        {
-            let mut index = self.index.read().await;
-            for (key, pos) in index.iter() {
-                // 这里可以根据 key 和 pos 把数据写入 tmp_file
-                let mut buffer = ;
-                self.wal_reader.read_at(&mut buffer, pos.offset).await?;
-                tmp_file.write_all(&buffer).await?;
-            }
-            tmp_file.flush().await?;
-        }
+        let mut new_current_offset = 0u64;
 
-        // 替换原文件
-        std::fs::rename(&tmp_file_path, &self.file_path)?;
+        // ============ 临界区开始 (Stop The World) ============
+        {
+            // 获取全局写锁，阻塞所有的并发 set/get/remove
+            let mut index_guard = self.index.write().await;
+            let mut writer_guard = self.wal_writer.lock().await;
+
+            for (key, pos) in index_guard.iter_mut() {
+                // 1. 根据旧的 offset，从文件中读取旧的 value
+                let mut value_buf = vec![0u8; pos.length as usize];
+                
+                // 注意：这里没有 .await! 因为 read_at 是同步 API。
+                // 虽然在 async 环境下调用少量同步 API 会有极微小的阻塞，但对于紧凑的本地 SSD 顺序压缩，可暂时容忍。
+                self.wal_reader.read_at(&mut value_buf, pos.offset)?;
+
+                // 2. 将字节数组无损转回 String
+                let value_str = String::from_utf8(value_buf)
+                    .map_err(|_| crate::error::KvError::ParseError("Invalid UTF-8 in DB".to_string()))?;
+
+                // 3. 按照物理协议格式化为日志行
+                let log_line = format!("S\t{}\t{}\n", key, value_str);
+                let log_bytes = log_line.as_bytes();
+
+                // 4. 写入临时文件
+                use tokio::io::AsyncWriteExt;
+                tmp_file.write_all(log_bytes).await?;
+
+                // 5. TODO: 计算这个 Value 在【临时文件】中的全新起始偏移量
+                // 提示：与 new() 函数里的逻辑一致，利用 new_current_offset
+                let new_value_offset = new_current_offset + 2 + key.len() as u64 + 1;
+
+                // 6. 就地更新内存中 HashMap 的索引游标！
+                pos.offset = new_value_offset;
+
+                // 7. TODO: 更新 new_current_offset，让游标前进当前这整行日志的字节数
+                new_current_offset += log_bytes.len() as u64;
+            }
+
+            tmp_file.flush().await?;
+
+            // 8. 操作系统原子替换文件
+            tokio::fs::rename(&tmp_path, &self.file_path).await?;
+
+            // 9. 重新以追加模式打开文件，供后续的 set 操作使用
+            let new_append_file = tokio::fs::OpenOptions::new()
+                .read(true)
+                .append(true)
+                .create(true)
+                .open(&self.file_path)
+                .await?;
+
+            // 10. TODO: 将 writer_guard 解引用，将其底层的 (File, u64) 替换为 (new_append_file, new_current_offset)
+            // 提示：利用解引用操作符 *
+            *writer_guard = (new_append_file, new_current_offset);
+
+        } // ============ 临界区结束，释放所有锁 ============
 
         Ok(())
     }
@@ -673,7 +717,7 @@ impl StorageEngine for DiskStorage {
         let log_bytes = log_line.as_bytes();
         let write_len = log_bytes.len() as u32;
 
-        let offset = {
+        let _offset = {
             // let mut writer = self.wal_writer.lock().await;
             // let start_offset = writer.current_offset();
             // writer.write_all(log_bytes).await?;
