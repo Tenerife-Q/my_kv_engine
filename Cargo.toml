@@ -13,6 +13,7 @@ bytes = "1.5"
 tokio-util = { version = "0.7.10", features = ["codec"] }
 futures = "0.3"
 tokio-stream = "0.1"
+clap = { version = "4.4", features = ["derive"] }
 
 # 保留原有的 server/client
 [[bin]]
@@ -31,3 +32,7 @@ path = "src/bin/server_v2.rs"
 [[bin]]
 name = "client_v2"
 path = "src/bin/client_v2.rs"
+
+
+[dev-dependencies]
+tempfile = "3.8"
