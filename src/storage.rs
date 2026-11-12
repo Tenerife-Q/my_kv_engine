@@ -744,3 +744,53 @@ impl StorageEngine for DiskStorage {
         Ok(())
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*; // 将同文件上方的 DiskStorage, StorageEngine 统统引入
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_concurrent_set_get() {
+        // 1. 获取物理隔离的沙盒目录
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test_concurrent.log");
+        let db_path_str = db_path.to_str().unwrap().to_string();
+
+        // 2. 初始化引擎
+        let engine = Arc::new(DiskStorage::new(db_path_str).await.unwrap());
+
+        // 3. M:N 调度并发写测试
+        let mut handles = vec![];
+        for i in 0..100 {
+            let engine_clone = Arc::clone(&engine);
+            // 将每一个写操作扔进独立的 tokio 绿色线程（Task）
+            let handle = tokio::spawn(async move {
+                let key = format!("key_{}", i);
+                let val = format!("val_{}", i);
+                // 引擎的 set 内部包含了追加写锁和 HashMap 锁，这里测试它们会不会死锁
+                engine_clone.set(key, val).await.unwrap();
+            });
+            handles.push(handle);
+        }
+
+        // 4. Join 点：阻塞等待这 100 个并发任务全部执行完毕
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        // 5. 验证读的正确性
+        // TODO: 写一个 0..100 的 for 循环。
+        // 在循环内：
+        //   A. 计算出期望的 key (如 "key_0") 和期望的 val (如 "val_0")
+        //   B. 调用 engine.get 去查询，用 unwrap() 把 Result 和 Option 都解开。
+        //   C. 使用标准库的 assert_eq!(actual, expected) 断言它们绝对相等。
+        for i in 0..100 {
+            let key = format!("key_{}", i);
+            let expected_val = format!("val_{}", i);
+            let actual_val = engine.get(&key).await.unwrap().unwrap();
+            assert_eq!(actual_val, expected_val);
+        }
+    }
+}
