@@ -714,7 +714,7 @@ impl StorageEngine for DiskStorage {
             // 这里尽量不能写 Ok(value_str) 
             // 在 Rust 的闭包内部，由于使用了 ? 运算符，编译器需要推导这个闭包最终返回的 Result<T, E> 的具体类型。
             // 如果只写 Ok(value_str)，编译器有时无法准确推断出错误类型 E 到底是什么（是 std::io::Error 还是 KvError）。
-            
+
         }).await.expect("Spawn blocking failed"); // 这里 expect 捕获的是线程崩溃的恐慌
 
         // 返回解包后的结果
@@ -791,6 +791,8 @@ mod tests {
         }
 
         // 4. Join 点：阻塞等待这 100 个并发任务全部执行完毕
+        // 主测试线程会在这里卡住（等待），直到这 100 个并发写任务全部执行完毕。
+        // 如果中途哪个任务发生 Panic（恐慌崩溃），unwrap() 会立刻捕获并让整个测试报错失败。
         for h in handles {
             h.await.unwrap();
         }
@@ -800,6 +802,8 @@ mod tests {
         // 在循环内：
         //   A. 计算出期望的 key (如 "key_0") 和期望的 val (如 "val_0")
         //   B. 调用 engine.get 去查询，用 unwrap() 把 Result 和 Option 都解开。
+        //      第一个 unwrap()：解开 tokio::task::spawn_blocking 返回的 Result（捕获线程恐慌）。
+        //      第二个 unwrap()：解开 StorageEngine::get() 返回的 Result<Option<String>> 中的 Option（确保 Key 一定存在，若为 None 则直接报错）。
         //   C. 使用标准库的 assert_eq!(actual, expected) 断言它们绝对相等。
         for i in 0..100 {
             let key = format!("key_{}", i);
