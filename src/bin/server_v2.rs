@@ -108,14 +108,21 @@ use my_kv_engine::cmd::Command;
 // 为什么放在这里？因为它是 Server 专属的入口配置，不需要污染 lib.rs。
 #[derive(Parser, Debug)]
 #[command(name = "my-kv-server", version = "2.0", about = "Bitcask KV Storage Server")]
+// 为整个 CLI 程序配置元数据。当用户在终端输入 --help 时，会显示这里的程序名称 (my-kv-server)、版本号 (2.0) 和描述信息。
 struct Args {
     // 监听端口，默认为 6379
     #[arg(short, long, default_value_t = 6379)]
     port: u16,
+    // short：自动生成短参数 -p（取首字母）。
+    // long：自动生成长参数 --port。
+    // default_value_t = 6379：如果用户启动时不传该参数，则使用默认值 6379
 
     // 数据库文件路径，默认为当前目录的 data.log
     #[arg(short = 'd', long = "db", default_value = "data.log")]
     db_path: String,
+    // short = 'd'：自定义短参数为 -d。
+    // long = "db"：自定义长参数为 --db。
+    // default_value = "data.log"：数据库文件的默认路径为当前目录下的 data.log。
 }
 
 // (你的 handle_client 函数完全保持不变，不要动它)
