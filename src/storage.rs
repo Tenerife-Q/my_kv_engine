@@ -312,6 +312,9 @@ impl DiskStorage {
                 let new_value_offset = new_current_offset + 2 + key.len() as u64 + 1;
 
                 // 6. 就地更新内存中 HashMap 的索引游标！
+                // 巧妙设计：index_guard.iter_mut()获取的是内存哈希中CommandPos可变借用
+                // 我们在把数据重新写入临时文件的同时，顺便把内存里记录的旧偏移量直接修改成了新文件里的偏移量。
+                // 这样压缩完成后，内存索引无缝对接，完全不需要重新构建。
                 pos.offset = new_value_offset;
 
                 // 7. TODO: 更新 new_current_offset，让游标前进当前这整行日志的字节数
@@ -641,6 +644,10 @@ impl StorageEngine for DiskStorage {
             let mut writer_guard = self.wal_writer.lock().await;
             let (file, current_offset) = &mut *writer_guard;
 
+            // file: &mut File
+            // current_offset: &mut u64
+            // 所以后面要使用 *current_offset 解引用指向实际的偏移量并复制给 start_offset
+
             // 2. 拿到当前的游标，作为本次数据的写入起点
             let start_offset = *current_offset;
 
@@ -698,9 +705,16 @@ impl StorageEngine for DiskStorage {
             // 将纯净的字节反序列化为 String
             let value_str = String::from_utf8(buf)
                 .map_err(|_| crate::error::KvError::ParseError("Invalid utf8 in db".to_string()))?;
+            // .map_err(|_|) 当 Result 处于 Err 状态时，把原有的底层错误吞掉（用 _ 忽略），
+            // 并映射（Map）转换成我们自定义的错误类型”。
                 
             // 注意这里需要明确指明返回值的错误类型，匹配最外层的闭包要求
             Ok::<String, crate::error::KvError>(value_str)
+            // Ok::<成功时的类型, 错误时的类型>(返回值)
+            // 这里尽量不能写 Ok(value_str) 
+            // 在 Rust 的闭包内部，由于使用了 ? 运算符，编译器需要推导这个闭包最终返回的 Result<T, E> 的具体类型。
+            // 如果只写 Ok(value_str)，编译器有时无法准确推断出错误类型 E 到底是什么（是 std::io::Error 还是 KvError）。
+            
         }).await.expect("Spawn blocking failed"); // 这里 expect 捕获的是线程崩溃的恐慌
 
         // 返回解包后的结果
@@ -717,7 +731,10 @@ impl StorageEngine for DiskStorage {
         let log_bytes = log_line.as_bytes();
         let write_len = log_bytes.len() as u32;
 
-        let _offset = {
+
+        // 这里和上面的set不同 不需要知道start_offset 不需要查磁盘 因为后面不需要算内存value索引
+        // 只需要在 WAL 里追加一条删除记录即可 并从内存索引中移除该 key
+        {
             // let mut writer = self.wal_writer.lock().await;
             // let start_offset = writer.current_offset();
             // writer.write_all(log_bytes).await?;
@@ -734,9 +751,7 @@ impl StorageEngine for DiskStorage {
             file.flush().await?;
 
             *current_offset += write_len as u64;
-
-            start_offset
-        };
+        }
 
         let mut index = self.index.write().await;
         index.remove(&k);
